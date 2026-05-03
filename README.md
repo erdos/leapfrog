@@ -36,27 +36,28 @@ Then, function `leapfrog-join` produces a new `LinearIterator` to visit elements
 ### Trie Iterator
 
 Utility function `trie-iterator` can be used to produce a `TrieIterator` from a set of tuples.
-However, most functions also need a *variable ordering* to work with, so most functions will work with
-maps of keys `:variable-ordering` providing a vector of variables and `:trie-iterator` holding a `TrieIterator`.
+
+Since most functions rely on a specific *variable ordering* to traverse the tries, they accept a configuration map with the following keys:
+- `:variable-ordering` a vector specifying the order of variables.
+- `:trie-iterator` holding the `TrieIterator` intance.
 
 ```clojure
 (def trie1 (trie-iterator [[1 2 3] [1 2 4] ...]))
 (def t1 {:variable-ordering [:a :b :c] :trie-iterator trie1})
 ```
 
-- Function `union` constructs the iterator of the union of multiple such trees.
-- Function `trie-join` constructs the intersection of such trees.
-- Function `trie-antijoin` constructs the antijoin (difference) of two trees.
+- Function `trie-join` constructs the intersection of such tries using the **LFTJ Algorithm**.
+- Function `union` constructs the iterator of the union of multiple tries as discussed in the LFTJ article.
+- Function `trie-antijoin` computes the antijoin (set difference) between two tries.
 
-Most functions have a `-iterator` suffixed version also which directly returns a `TrieIterator` instead of the map form.
-There are also some helpers available when working with tries:
+Most functions have a `-iterator` suffixed version also which directly returns a `TrieIterator` instead of the map form. There are also some helpers available when working with tries:
 
-- Functions `bfs` and `dfs` return a breadth-first and a depth-first walk over the supplied trie.
+- Functions `bfs` and `dfs` return a lazy seq of breadth-first and a depth-first walk over the supplied trie.
 - Function `trie-routes` returns a lazy seq of all paths from the root to the leaves of the trie.
-- Function `reorder` can be used to change the variable ordering of a trie iterator.
-- Function `eager` returns a view of a trie iterator that skips incomplete branches.
+- Function `reorder` changes the variable ordering of a trie iterator.
+- Function `eager` constructs a view of a trie iterator that skips incomplete branches.
 
-See `triejoin_test.clj` for usage examples.
+Refer to `triejoin_test.clj` for common use cases and examples.
 
 ## Development
 
