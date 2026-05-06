@@ -139,3 +139,15 @@
               perm      (gen/shuffle variables)]
     (= (tree->maps rel)
        (tree->maps (reorder perm rel)))))
+
+
+(defspec filtering-matches-naive-filter
+  1000
+  (for-props [variables   gen-variables
+              filter-vars (gen-subsequence-of variables)
+              rel         (gen-n-tuple-trie variables)]
+    (= (->> (relations rel)
+            (filter (fn [m] (even? (reduce + (map m filter-vars))))))
+       (->> (filtering rel filter-vars (fn [& xs] (even? (reduce + xs))))
+            (relations)))))
+
