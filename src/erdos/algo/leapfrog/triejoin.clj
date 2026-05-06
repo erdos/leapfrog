@@ -421,3 +421,40 @@
   {:variables (:variables rel)
    :trie-iterator (eager-iterator rel)})
 
+
+(defn filtering-iterator [{:keys [variables trie-iterator]} filter-variables predicate]
+  (assert (subseq? filter-variables variables))
+  ((fn ctor [iter vars-rem filter-rem bindings]
+     (cond
+       (nil? iter) nil
+       (empty? filter-rem) iter
+
+       (and (= (first vars-rem) (first filter-rem))
+            (nil? (next filter-rem))
+            (not (apply predicate (conj bindings (get-key iter)))))
+       (recur (->next iter) vars-rem filter-rem bindings)
+
+       :else
+       (reify' (meta iter)
+         (->next  [_]   (ctor (->next iter) vars-rem filter-rem bindings))
+         (get-key [_]   (get-key iter))
+         (->seek  [_ k] (ctor (->seek iter k) vars-rem filter-rem bindings))
+         (trie-open [_]
+           (let [filter-here? (= (first vars-rem) (first filter-rem))]
+             (ctor (trie-open iter) (next vars-rem)
+                                    (if filter-here? (next filter-rem) filter-rem)
+                                    (if filter-here? (conj bindings (get-key iter)) bindings))))
+         (toString [_] "<Filtering>"))))
+   trie-iterator variables filter-variables []))
+
+
+(defn filtering
+  "Returns a relation map {:variables … :trie-iterator …} that wraps rel,
+   restricting the trie so a subtree under a path is only emitted when
+   predicate returns true for the bindings of filter-variables along that
+   path. filter-variables must be a subseq of rel's :variables and predicate
+   arity matches filter-variables."
+  [rel filter-variables predicate]
+  {:variables     (:variables rel)
+   :trie-iterator (filtering-iterator rel filter-variables predicate)})
+
