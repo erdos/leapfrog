@@ -290,3 +290,41 @@
 
   (testing "empty relation yields empty sequence"
     (is (empty? (relations {:variables [:a :b] :trie-iterator nil})))))
+
+
+(deftest filtering-tests
+  (testing "predicate always true is a no-op over the relation"
+    (is (= (trie-routes (:trie-iterator exponents))
+           (trie-routes (:trie-iterator (filtering exponents [:n1] (constantly true))))))
+    (is (= (trie-routes (:trie-iterator exponents))
+           (trie-routes (:trie-iterator (filtering exponents [:n1 :n2] (constantly true)))))))
+
+  (testing "predicate always false prunes all child subtrees from filter-var depth"
+    (let [rel (test-trie-iter [:a :b] [[1 10] [2 20] [3 30]])
+          out (filtering rel [:a] (constantly false))]
+      (is (empty? (trie-routes (:trie-iterator out))))))
+
+  (testing "filtering on prefix variable: keys past predicate-false branch have no children"
+    (let [out (filtering exponents [:n1] odd?)]
+      (is (= [[1 1 1] [3 9 27]]
+             (trie-routes (:trie-iterator out))))))
+
+  (testing "filtering on multiple variables uses bindings in filter-var order"
+    (let [out (filtering exponents [:n1 :n2] <)]
+      (is (= [[1] [2 4 8] [3 9 27] [4 16 64]]
+             (trie-routes (:trie-iterator out))))))
+
+  (testing "filter variables can be a non-prefix subseq of node variables"
+    (let [out (filtering exponents [:n2] even?)]
+      (is (= [[1] [2 4 8] [3] [4 16 64]]
+             (trie-routes (:trie-iterator out))))))
+
+  (testing "filtering composes with eager to drop phantom paths"
+    (is (= [{:n1 2 :n2 4 :n3 8} {:n1 3 :n2 9 :n3 27} {:n1 4 :n2 16 :n3 64}]
+           (relations (eager (filtering exponents [:n1 :n2] <))))))
+
+  (testing "filtering-iterator returns the trie-iterator directly"
+    (let [rel (test-trie-iter [:a :b] [[1 10] [2 20] [3 30] [4 40]])]
+      (is (= [[2 20] [4 40]]
+             (trie-routes (filtering-iterator rel [:a] even?)))))))
+
