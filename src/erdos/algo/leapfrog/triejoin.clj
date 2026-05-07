@@ -118,7 +118,7 @@
           (->next [_]   (ctor (leapfrog-next iterators)))
           (get-key [_]  (get-key (first iterators)))
           (->seek [this k]
-            (assert (<= (get-key this) k))
+            (assert (compare<= (get-key this) k))
             (ctor (leapfrog-seek iterators k)))
           (deref [_] iterators)
           (toString [_] "<Leapfrog-Join>"))))
@@ -143,9 +143,9 @@
           (let [min-key (get-key this)]
             (ctor (keep (fn [i] (if (= min-key (get-key i)) (->next i) i)) iterators))))
         (->seek [this k]
-          (assert (<= (get-key this) k))
+          (assert (compare<= (get-key this) k))
           (ctor (keep (fn [i] (if (compare<= k (get-key i)) i (->seek i k))) iterators)))
-        (get-key [_] (reduce min (map get-key iterators)))      
+        (get-key [_] (reduce (fn [a b] (if (compare<= a b) a b)) (map get-key iterators)))
         (trie-open [this]
         (let [min-key (get-key this)
               min-vec (filterv (fn [i] (= (get-key i) min-key)) iterators)]
