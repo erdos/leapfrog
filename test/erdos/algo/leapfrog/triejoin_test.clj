@@ -36,7 +36,16 @@
     (is (= [2 8] (vec (leapfrog-join [rel-1 rel-3]))))
     (is (= [2 8] (vec (leapfrog-join [rel-1 rel-2 rel-3]))))
     (is (= nil (leapfrog-join [rel-1 (sorted-iter (sorted-set -1))])))
-    #_(is (map? (meta (leapfrog-join [rel-1 rel-2]))))))
+    #_(is (map? (meta (leapfrog-join [rel-1 rel-2])))))
+
+  (testing "leapfrog-join over keyword-keyed iterators, including ->seek"
+    (let [a (sorted-iter (sorted-set :Esau :Isaac :Jacob :Joseph))
+          b (sorted-iter (sorted-set :Hank :Isaac :Jacob :Levi))
+          j (leapfrog-join [a b])]
+      (is (= [:Isaac :Jacob] (vec j)))
+      (is (= :Isaac (get-key (->seek j :Isaac))))
+      (is (= :Jacob (get-key (->seek j :Jacob))))
+      (is (nil? (->seek j :Zara))))))
 
 (deftest trie-iterator-tests
   (let [rels (sorted-set [1 3 4] [1 3 5] [1 4 6] [1 4 8] [1 4 9] [1 5 2] [3 5 2])
@@ -172,6 +181,15 @@
     (let [iter (union-iterator [prime-numbers sq-numbers])]
       (are [k val] (= val (some-> iter (->seek k) get-key))
         1 1, 4 4, 6 7, 6.5 7, 20 nil)))
+
+  (testing "Union over keyword-keyed tries"
+    (let [iter1 (test-trie-iter [:a] [[:Isaac] [:Jacob]])
+          iter2 (test-trie-iter [:a] [[:Esau] [:Jacob]])
+          u     (union-iterator [iter1 iter2])]
+      (is (= [:Esau :Isaac :Jacob] (vec u)))
+      (is (= :Isaac (get-key (->seek u :Hank))))
+      (is (= :Jacob (get-key (->seek u :Jacob))))
+      (is (nil? (->seek u :Zara)))))
 
   #_(testing "All iterators exhausted"
       (let [iter1 (sorted-iter (sorted-set 1 2))
