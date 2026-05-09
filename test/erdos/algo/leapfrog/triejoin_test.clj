@@ -169,8 +169,8 @@
            (vec (union-iterator [odd-numbers sq-numbers])))))
 
   (testing "->next advances to next key"
-    (let [iter1 (test-trie-iter :a [[1] [2] [3] [4] [5]])
-          iter2 (test-trie-iter :a [[2] [4] [6]])
+    (let [iter1 (test-trie-iter [:a] [[1] [2] [3] [4] [5]])
+          iter2 (test-trie-iter [:a] [[2] [4] [6]])
           union-iter (union-iterator [iter1 iter2])]
       (is (= 1 (get-key union-iter)))
       (is (= 2 (-> union-iter ->next get-key)))
@@ -345,4 +345,61 @@
     (let [rel (test-trie-iter [:a :b] [[1 10] [2 20] [3 30] [4 40]])]
       (is (= [[2 20] [4 40]]
              (trie-routes (filtering-iterator rel [:a] even?)))))))
+
+
+(deftest annotated-trie-iterator-tests
+  (testing "Map input stores annotation at the leaf, accessible via Annotated"
+    (let [iter (trie-iterator {[1 2 3] :foo})]
+      (is (= 1 (get-key iter)))
+      (is (= 2 (get-key (trie-open iter))))
+      (is (= 3 (get-key (trie-open (trie-open iter)))))
+      (is (= :foo (annotation (trie-open (trie-open iter)))))))
+
+  (testing "Map input across multiple tuples"
+    (let [iter (trie-iterator {[1 2] :a, [1 3] :b, [2 3] :c})]
+      (is (= [:a :b :c]
+             (for [k1 (iter-seq iter)
+                   :let [child (-> iter (->seek k1) trie-open)]
+                   k2 (iter-seq child)
+                   :let [leaf (->seek child k2)]]
+               (annotation leaf))))))
+
+  (testing "Sequence input keeps the original behaviour (no annotation)"
+    (let [iter (trie-iterator [[1 2 3]])]
+      ;; The leaf reify still implements Annotation, but its value is nil
+      ;; because no map values were supplied.
+      (is (= nil (annotation (trie-open (trie-open iter))))))))
+
+(deftest annotated-union-tests
+  (testing "union with combine-fn sums annotations of coincident tuples"
+    (let [r1 {:variables [:a :b]
+              :trie-iterator (trie-iterator {[1 2] 3})}
+          r2 {:variables [:a :b]
+              :trie-iterator (trie-iterator {[1 2] 4})}
+          u  (union [r1 r2] +)
+          leaf (-> u :trie-iterator trie-open)]
+      (is (= 7 (annotation leaf)))))
+
+  (testing "union without combine-fn behaves like the original (set semantics)"
+    (let [r1 {:variables [:a] :trie-iterator (trie-iterator [[1] [2]])}
+          r2 {:variables [:a] :trie-iterator (trie-iterator [[2] [3]])}
+          u  (union [r1 r2])]
+      (is (= #{[1] [2] [3]}
+             (set (trie-routes (:trie-iterator u))))))))
+
+
+(deftest annotated-trie-join-tests
+  (testing "trie-join with combine-fn multiplies annotations of contributing tuples"
+    (let [r {:variables [:a :b] :trie-iterator (trie-iterator {[1 2] 3})}
+          s {:variables [:b :c] :trie-iterator (trie-iterator {[2 9] 5})}
+          j (trie-join [:a :b :c] [r s] *)
+          leaf (-> j :trie-iterator trie-open trie-open)]
+      (is (= 15 (annotation leaf)))))
+
+  (testing "trie-join without combine-fn behaves like the original"
+    (let [r {:variables [:a :b] :trie-iterator (trie-iterator [[1 2] [1 3]])}
+          s {:variables [:b :c] :trie-iterator (trie-iterator [[2 9] [3 9]])}
+          j (trie-join [:a :b :c] [r s])]
+      (is (= #{[1 2 9] [1 3 9]}
+             (set (trie-routes (:trie-iterator j))))))))
 

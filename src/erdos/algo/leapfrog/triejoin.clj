@@ -9,6 +9,12 @@
   (->seek [_ k] "Returns iterator seeked to next key >= k if exists, nil otherwise."))
 
 
+(defprotocol Annotated
+  "Supplies annotation associated with the iterator's current position.
+   Only leaf-level iterators shold implement this."
+  (annotation [iter]))
+
+
 (defn iter-seq
 "Returns a seq over elements of a LinearIterator"
 [iterator]
@@ -43,6 +49,7 @@
 
      ~@(also-add 'LinearIterator '->next 'get-key '->seek)
      ~@(also-add 'TrieIterator 'trie-open)
+     ~@(also-add 'Annotated 'annotation)
      ~@(also-add 'Object 'toString)
      ~@(also-add 'clojure.lang.IDeref 'deref))
     ~metadata)))
@@ -133,71 +140,115 @@
 
 (defn union-iterator
   "Returns a TrieIterator that is the sorted union of the given iterators maps.
-   All iterators must carry the same :variables metadata."
-  [iterators]
-  (assert (or (empty? iterators) (apply = (map :variables iterators))))
-  ((fn ctor [iterators]
-    (when (seq iterators)
-      (reify' {}
-        (->next [this]
-          (let [min-key (get-key this)]
-            (ctor (keep (fn [i] (if (= min-key (get-key i)) (->next i) i)) iterators))))
-        (->seek [this k]
-          (assert (compare<= (get-key this) k))
-          (ctor (keep (fn [i] (if (compare<= k (get-key i)) i (->seek i k))) iterators)))
-        (get-key [_] (reduce (fn [a b] (if (compare<= a b) a b)) (map get-key iterators)))
-        (trie-open [this]
-        (let [min-key (get-key this)
-              min-vec (filterv (fn [i] (= (get-key i) min-key)) iterators)]
-          (ctor (keep trie-open min-vec))))
-        (toString [_] "<Merge-Iterator>"))))
-    (map :trie-iterator iterators)))
+   All iterators must carry the same :variables metadata. When combine-fn is
+   supplied, leaf-level coincident keys have their annotations combined via
+   (combine-fn a b) and the result iterator's leaf implements Annotated."
+  ([iterators] (union-iterator iterators nil))
+  ([iterators combine-fn]
+   (assert (or (empty? iterators) (apply = (map :variables iterators))))
+   (let [var-count (count (:variables (first iterators)))]
+     ((fn ctor [iters depth metadata]
+        (when (seq iters)
+          (if (and combine-fn (= depth (dec var-count)))
+            (let [min-key (reduce (fn [a b] (if (compare<= a b) a b)) (map get-key iters))
+                  matching (filterv #(= min-key (get-key %)) iters)
+                  combined (reduce combine-fn (map annotation matching))]
+              (reify' metadata
+                (->next [this]
+                  (ctor (keep #(if (= min-key (get-key %)) (->next %) %) iters) depth (meta this)))
+                (->seek [this k]
+                  (assert (compare<= (get-key this) k))
+                  (ctor (keep #(if (compare<= k (get-key %)) % (->seek % k)) iters) depth (meta this)))
+                (get-key [_] min-key)
+                (trie-open [_] nil)
+                (annotation [_] combined)
+                (toString [_] "<Merge-Iterator>")))
+            (reify' metadata
+              (->next [this]
+                (let [min-key (get-key this)]
+                  (ctor (keep (fn [i] (if (= min-key (get-key i)) (->next i) i)) iters) depth (meta this))))
+              (->seek [this k]
+                (assert (compare<= (get-key this) k))
+                (ctor (keep (fn [i] (if (compare<= k (get-key i)) i (->seek i k))) iters) depth (meta this)))
+              (get-key [_] (reduce (fn [a b] (if (compare<= a b) a b)) (map get-key iters)))
+              (trie-open [this]
+                (let [min-key (get-key this)
+                      min-vec (filterv (fn [i] (= (get-key i) min-key)) iters)]
+                  (ctor (keep trie-open min-vec) (inc depth) (meta this))))
+              (toString [_] "<Merge-Iterator>")))))
+      (keep :trie-iterator iterators)
+      0
+      nil))))
 
 
 (defn union
   "Returns a relation map {:variables … :trie-iterator …} representing the
-   union of the given relations. All relations must share the same variable list."
-  [iterators]
-  {:variables (:variables (first iterators))
-   :trie-iterator (union-iterator iterators)})
+   union of the given relations. All relations must share the same variable list.
+   With combine-fn, leaf annotations of coincident tuples are combined."
+  ([iterators] (union iterators nil))
+  ([iterators combine-fn]
+   {:variables (:variables (first iterators))
+    :trie-iterator (union-iterator iterators combine-fn)}))
 
 
 (defn trie-iterator
   "Given a collection of tuples, builds a sorted nested trie and returns a
    TrieIterator positioned at the root's first key. Each tuple is a sequence
-   of values defining a path from root to leaf through the trie."
+   of values defining a path from root to leaf through the trie.
+
+   When `relations` is a map, its keys are taken as tuples and values are
+   stored as annotations."
   [relations]
-  (let [trie (reduce (fn [trie rel]
-                       ((fn g [trie p]
-                          (when (seq p)
-                            (update (or trie (sorted-map)) (first p) g (next p))))
-                        trie rel))
-                     (sorted-map)
-                     relations)]
-    (trie-open
+  (when-let [pairs (seq (if (map? relations)
+                          (seq relations)
+                          (map (fn [t] [t nil]) relations)))]
+    (let [trie (reduce (fn [trie [rel k]]
+                         ((fn g [trie p]
+                            (if (empty? p)
+                              k
+                              (update (or trie (sorted-map)) (first p) g (next p))))
+                          trie rel))
+                       (sorted-map)
+                       pairs)]
+      (trie-open
      ((fn ctor [[current-level-seq :as stack] metadata]
-        (reify' metadata
-          (get-key [_]
-            (when (seq current-level-seq)
-              (key (first current-level-seq))))
-          (->next [this]
-            (let [n (next current-level-seq)]
-              (when n (ctor (cons n (rest stack)) (meta this)))))
-          (->seek [this k]
-            (let [parent-map (if (second stack)
-                                (val (first (second stack)))
-                                trie)]
-              (when-let [s (seq (subseq parent-map >= k))]
-                (ctor (cons s (rest stack)) (meta this)))))
-          (trie-open [this]
-            ; open() moves to the first key at the next depth
-            (let [child-map (val (first current-level-seq))]
-              (when (map? child-map)
-                ; If it's a leaf/value, we stay put or handle as needed
-                (ctor (cons (seq child-map) stack) (meta this)))))
-          (toString [_] (str "Path: " (mapv (comp key first) (reverse stack))))))
+        (let [first-val (when (seq current-level-seq) (val (first current-level-seq)))
+              leaf?     (and (seq current-level-seq) (not (sorted? first-val)))]
+          (if leaf?
+            (reify' metadata
+              (get-key [_] (key (first current-level-seq)))
+              (->next [this]
+                (let [n (next current-level-seq)]
+                  (when n (ctor (cons n (rest stack)) (meta this)))))
+              (->seek [this k]
+                (let [parent-map (if (second stack)
+                                    (val (first (second stack)))
+                                    trie)]
+                  (when-let [s (seq (subseq parent-map >= k))]
+                    (ctor (cons s (rest stack)) (meta this)))))
+              (trie-open [_] nil)
+              (annotation [_] (val (first current-level-seq)))
+              (toString [_] (str "Path: " (mapv (comp key first) (reverse stack)))))
+            (reify' metadata
+              (get-key [_]
+                (when (seq current-level-seq)
+                  (key (first current-level-seq))))
+              (->next [this]
+                (let [n (next current-level-seq)]
+                  (when n (ctor (cons n (rest stack)) (meta this)))))
+              (->seek [this k]
+                (let [parent-map (if (second stack)
+                                    (val (first (second stack)))
+                                    trie)]
+                  (when-let [s (seq (subseq parent-map >= k))]
+                    (ctor (cons s (rest stack)) (meta this)))))
+              (trie-open [this]
+                (let [child-map (val (first current-level-seq))]
+                  (when (sorted? child-map)
+                    (ctor (cons (seq child-map) stack) (meta this)))))
+              (toString [_] (str "Path: " (mapv (comp key first) (reverse stack))))))))
       (list (seq {nil trie}))
-      (meta trie)))))
+      (meta trie))))))
 
 
 (defn trie-join-iterator
@@ -205,34 +256,50 @@
    under the given variable-ordering. Each relation must supply :variables (a
    subsequence of variable-ordering) and :trie-iterator. At each depth the
    algorithm performs a leapfrog join over the relations that share that depth's
-   variable. Returns nil when no join result exists."
-  [variable-ordering relations]
-  (assert (every? #(subseq? % variable-ordering) (map :variables relations)))
-  ((fn ctor [trie-iterators stack]
-    (when (seq stack)
-      ((fn ctor' [leapfrog-join-iter]
-        (when leapfrog-join-iter
-          (reify' {}
-            ; The linear iterator methods are delegated to the leapfrog-join at the current depth.
-            (->next [_]     (ctor' (->next leapfrog-join-iter)))
-            (get-key [_]    (get-key leapfrog-join-iter))
-            (->seek [_ key] (ctor' (->seek leapfrog-join-iter key)))
-            (trie-open [_]
-              (ctor (reduce (fn [m i] (assoc m (-> i meta ::index) (trie-open i))) trie-iterators @leapfrog-join-iter)
-                    (next stack)))
-            (toString [_] "<TrieJoin>"))))
-      (leapfrog-join (map trie-iterators (first stack))))))
+   variable. Returns nil when no join result exists.
+
+   When combine-fn is supplied, the result tuple's leaf annotation is
+   computed by reducing combine-fn over the contributing iterators' annotations."
+  ([variable-ordering relations]
+   (trie-join-iterator variable-ordering relations nil))
+  ([variable-ordering relations combine-fn]
+   (assert (every? #(subseq? % variable-ordering) (map :variables relations)))
+   (when (every? :trie-iterator relations)
+     ((fn ctor [trie-iterators stack metadata]
+      (when (seq stack)
+        ((fn ctor' [leapfrog-join-iter local-meta]
+           (when leapfrog-join-iter
+             (reify' local-meta
+               ; The linear iterator methods are delegated to the leapfrog-join at the current depth.
+               (->next [this]     (ctor' (->next leapfrog-join-iter) (meta this)))
+               (get-key [_]       (get-key leapfrog-join-iter))
+               (->seek [this key] (ctor' (->seek leapfrog-join-iter key) (meta this)))
+               (trie-open [this]
+                 (ctor (reduce (fn [m i] (assoc m (-> i meta ::index) (or (trie-open i) i)))
+                               trie-iterators @leapfrog-join-iter)
+                       (next stack)
+                       (meta this)))
+               (annotation [_]
+                 (when (and combine-fn (empty? (next stack)))
+                   (reduce combine-fn (map annotation trie-iterators))))
+               (toString [_] "<TrieJoin>"))))
+         (leapfrog-join (map trie-iterators (first stack))) metadata)))
     (vec (map-indexed (fn [idx rel] (with-meta (:trie-iterator rel) {::index idx})) relations))
     (map (fn [v] (keep-indexed (fn [rel-idx relation] (when (some #{v} (:variables relation)) rel-idx)) relations))
-         variable-ordering)))
+         variable-ordering)
+    nil))))
 
 
 (defn trie-join
   "Returns a relation map {:variables … :trie-iterator …} for the Leapfrog
-   Triejoin of all given relations under variable-ordering."
-  [variable-ordering relations]
-  {:variables     variable-ordering
-   :trie-iterator (trie-join-iterator variable-ordering relations)})
+   Triejoin of all given relations under variable-ordering. With combine-fn,
+   leaf annotations of contributing tuples are combined."
+  ([variable-ordering relations]
+   {:variables     variable-ordering
+    :trie-iterator (trie-join-iterator variable-ordering relations)})
+  ([variable-ordering relations combine-fn]
+   {:variables     variable-ordering
+    :trie-iterator (trie-join-iterator variable-ordering relations combine-fn)}))
 
 
 (defn trie-antijoin-iterator
@@ -444,6 +511,7 @@
              (ctor (trie-open iter) (next vars-rem)
                                     (if filter-here? (next filter-rem) filter-rem)
                                     (if filter-here? (conj bindings (get-key iter)) bindings))))
+         (annotation [_] (annotation iter))
          (toString [_] "<Filtering>"))))
    trie-iterator variables filter-variables []))
 
