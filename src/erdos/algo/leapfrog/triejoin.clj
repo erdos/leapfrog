@@ -395,15 +395,20 @@
         :when (= (count route) (count variables))]
     (zipmap variables route)))
 
-#_
 (defn singleton
-  "Returns an iterator over a single value."
-  [value]
-  (reify' {}
-    (->next [_] nil)
-    (get-key [_] value)
-    (->seek [t k] (when (= k value) t))
-    (trie-open [_] nil)))
+  "Returns a TrieIterator carrying a single key. trie-open returns child
+   (default nil). Metadata defaults to that of child. When the singleton is
+   used as a leaf, annotation-value is exposed via the Annotated protocol."
+  ([value] (singleton value nil nil))
+  ([value child] (singleton value child nil))
+  ([value child annotation-value]
+   (reify' (meta child)
+     (->next [_] nil)
+     (get-key [_] value)
+     (->seek [t k] (when (compare<= k value) t))
+     (trie-open [_] child)
+     (annotation [_] annotation-value)
+     (toString [_] (str "<Singleton " value ">")))))
 
 
 (defn seek-to
@@ -415,7 +420,7 @@
       iterator)))
 
 
-(defn- reorder-1 [ctx new-var-order old-var-order old-iterator]
+(defn- reorder-1 [ctx new-var-order old-var-order old-iterator annotation-value]
   (assert (map? ctx))
   (assert (= (set new-var-order)
              (into (set old-var-order) (keys ctx))))
@@ -427,42 +432,51 @@
      old-iterator
 
      (= (first new-var-order) (first old-var-order))
-     ((fn ctor [old-iterator]
-        (when old-iterator
-          (reify' (meta old-iterator)
-            (get-key [_]  (get-key old-iterator))
-            (->next [_]   (ctor (->next old-iterator)))
-            (->seek [_ k] (ctor (->seek old-iterator k)))
-            (trie-open [_]
-              (reorder-1 ctx (next new-var-order) (next old-var-order) (trie-open old-iterator))))))
-      old-iterator)
+     (let [leaf? (empty? (next new-var-order))]
+       ((fn ctor [old-iterator]
+          (when old-iterator
+            (reify' (meta old-iterator)
+              (get-key [_]  (get-key old-iterator))
+              (->next [_]   (ctor (->next old-iterator)))
+              (->seek [_ k] (ctor (->seek old-iterator k)))
+              (trie-open [_]
+                (let [next-old (next old-var-order)
+                      next-ann (if (empty? next-old) (annotation old-iterator) annotation-value)]
+                  (reorder-1 ctx (next new-var-order) next-old (trie-open old-iterator) next-ann)))
+              (annotation [_] (when leaf? (annotation old-iterator))))))
+        old-iterator))
 
      (contains? ctx (first new-var-order))
-     (reify' {}
-      (get-key [_] (get ctx (first new-var-order)))
-      (->next [_] nil)
-      (->seek [_ k] (when (= k (get ctx (first new-var-order))) k))
-      (trie-open [_] 
-      ;; TODO: inline this check to the top of reorder-1
-        (reorder-1 (dissoc ctx (first new-var-order))
-                    (next new-var-order)
-                    old-var-order
-                    old-iterator)))
+     (let [leaf? (empty? (next new-var-order))]
+       (reify' {}
+        (get-key [_] (get ctx (first new-var-order)))
+        (->next [_] nil)
+        (->seek [_ k] (when (= k (get ctx (first new-var-order))) k))
+        (trie-open [_]
+        ;; TODO: inline this check to the top of reorder-1
+          (reorder-1 (dissoc ctx (first new-var-order))
+                      (next new-var-order)
+                      old-var-order
+                      old-iterator
+                      annotation-value))
+        (annotation [_] (when leaf? annotation-value))))
 
       :else
-      (->> (iterate ->next old-iterator)
-           (take-while some?)
-           (keep #(reorder-1 (assoc ctx (first old-var-order) (get-key %))
-                            new-var-order
-                            (next old-var-order)
-                            (trie-open %)))
-           (map #(hash-map :variables new-var-order :trie-iterator %))
-           (union-iterator))))
+      (let [advance-leaf? (empty? (next old-var-order))]
+        (-> (->> (iterate ->next old-iterator)
+                 (take-while some?)
+                 (keep #(reorder-1 (assoc ctx (first old-var-order) (get-key %))
+                                  new-var-order
+                                  (next old-var-order)
+                                  (trie-open %)
+                                  (if advance-leaf? (annotation %) annotation-value)))
+                 (map #(hash-map :variables new-var-order :trie-iterator %)))
+            (union-iterator (fn [a _] a))))))
 
 
 (defn reorder [new-var-order iter]
   {:variables new-var-order
-   :trie-iterator (reorder-1 {} new-var-order (:variables iter) (:trie-iterator iter))})
+   :trie-iterator (reorder-1 {} new-var-order (:variables iter) (:trie-iterator iter) nil)})
 
 
 (defn eager-iterator [{:keys [trie-iterator variables]}]
@@ -476,6 +490,7 @@
             (get-key [_]   (get-key iter))
             (->seek  [_ k] (ctor (->seek iter k) depth))
             (trie-open [_] child)
+            (annotation [_] (when (zero? depth) (annotation iter)))
             (toString [_] "<Eager>"))))))
       trie-iterator (dec (count variables))))
 
@@ -525,4 +540,113 @@
   [rel filter-variables predicate]
   {:variables     (:variables rel)
    :trie-iterator (filtering-iterator rel filter-variables predicate)})
+
+
+(defn- insert-after-last [variables subseq-variables target-key]
+  (if (empty? subseq-variables)
+    (vec (cons target-key variables))
+    (let [last-sub (last subseq-variables)
+          [head tail] (split-with #(not= last-sub %) variables)]
+      (vec (concat head [last-sub target-key] (rest tail))))))
+
+
+(defn mapping-iterator [{:keys [variables trie-iterator]} subseq-variables function target-key]
+  (assert (subseq? subseq-variables variables))
+  (assert (not-any? #{target-key} variables))
+  (if (empty? subseq-variables)
+    (singleton (function) trie-iterator)
+    ((fn ctor [iter vars-rem subseq-rem bindings]
+       (cond
+         (nil? iter) nil
+         (empty? subseq-rem) iter
+
+         :else
+         (reify' (meta iter)
+           (->next  [_]   (ctor (->next iter) vars-rem subseq-rem bindings))
+           (get-key [_]   (get-key iter))
+           (->seek  [_ k] (ctor (->seek iter k) vars-rem subseq-rem bindings))
+           (trie-open [_]
+             (let [bind-here? (= (first vars-rem) (first subseq-rem))
+                   bindings'  (if bind-here? (conj bindings (get-key iter)) bindings)
+                   subseq'    (if bind-here? (next subseq-rem) subseq-rem)]
+               (if (and bind-here? (empty? subseq'))
+                 (let [child (trie-open iter)]
+                   (singleton (apply function bindings')
+                              child
+                              (when (nil? child) (annotation iter))))
+                 (ctor (trie-open iter) (next vars-rem) subseq' bindings'))))
+           (toString [_] "<Mapping>"))))
+     trie-iterator variables subseq-variables [])))
+
+
+(defn mapping
+  "Returns a relation map {:variables … :trie-iterator …} that wraps rel,
+   inserting a new level into the variable ordering immediately after the
+   last element of subseq-variables (or at the beginning when
+   subseq-variables is empty). The new level's key is produced by applying
+   function to the bindings of subseq-variables along the path.
+   subseq-variables must be a subseq of rel's :variables, target-key must
+   not already appear in :variables, and function's arity must match
+   subseq-variables."
+  [rel subseq-variables function target-key]
+  {:variables     (insert-after-last (:variables rel) subseq-variables target-key)
+   :trie-iterator (mapping-iterator rel subseq-variables function target-key)})
+
+
+(defn- collect-annotation [vars-rem iter combine-fn]
+  (when iter
+    (if (empty? (next vars-rem))
+      (annotation iter)
+      (some->> (trie-open iter)
+               (iterate ->next)
+               (take-while some?)
+               (keep #(collect-annotation (next vars-rem) % combine-fn))
+               not-empty
+               (reduce combine-fn)))))
+
+
+(defn omit-iterator
+  "Returns a TrieIterator over subseq-variables that projects rel onto
+   subseq-variables, omitting layers not present in subseq-variables.
+   Annotations of original leaves whose projections coincide are reduced
+   via combine-fn."
+  [iter-map subseq-variables combine-fn]
+  (assert (subseq? subseq-variables (:variables iter-map)))
+  ((fn ctor [iter vars-rem subseq-rem]
+     (cond
+       (nil? iter) nil
+
+       (= (first vars-rem) (first subseq-rem))
+       (let [new-leaf? (empty? (next subseq-rem))]
+         (reify' (meta iter)
+           (get-key   [_]   (get-key iter))
+           (->next    [_]   (ctor (->next iter)   vars-rem subseq-rem))
+           (->seek    [_ k] (ctor (->seek iter k) vars-rem subseq-rem))
+           (trie-open [_]
+             (when-not new-leaf?
+               (ctor (trie-open iter) (next vars-rem) (next subseq-rem))))
+           (annotation [_]
+             (when new-leaf? (collect-annotation vars-rem iter combine-fn)))
+           (toString [_] "<Omit>")))
+
+       :else
+       (union-iterator
+         (for [it (take-while some? (iterate ->next iter))
+               :let [child (ctor (trie-open it) (next vars-rem) subseq-rem)]
+               :when child]
+           {:variables subseq-rem, :trie-iterator child})
+         combine-fn)))
+   (eager-iterator iter-map) (:variables iter-map) subseq-variables))
+
+
+(defn omit
+  "Returns a relation map {:variables subseq-variables :trie-iterator …}
+   that projects rel onto subseq-variables, dropping the variables of rel
+   not present in subseq-variables. subseq-variables must be a subsequence
+   of rel's :variables. Annotations of original tuples whose projections
+   coincide are reduced via combine-fn. Phantom paths in the source are
+   pruned via `eager` so they're not promoted to complete tuples."
+  [rel subseq-variables combine-fn]
+  {:variables     subseq-variables
+   :trie-iterator (omit-iterator rel subseq-variables combine-fn)})
 
