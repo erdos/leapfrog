@@ -347,6 +347,65 @@
              (trie-routes (filtering-iterator rel [:a] even?)))))))
 
 
+(deftest mapping-tests
+  (testing "empty subseq prepends a constant level"
+    (let [rel (test-trie-iter [:a :b] [[1 10] [2 20]])
+          out (mapping rel [] (constantly 99) :c)]
+      (is (= [:c :a :b] (:variables out)))
+      (is (= [[99 1 10] [99 2 20]]
+             (trie-routes (:trie-iterator out))))))
+
+  (testing "single-arg mapping inserts level immediately after subseq variable"
+    (let [rel (test-trie-iter [:n] [[1] [2] [3]])
+          out (mapping rel [:n] #(* % %) :sq)]
+      (is (= [:n :sq] (:variables out)))
+      (is (= [[1 1] [2 4] [3 9]]
+             (trie-routes (:trie-iterator out))))))
+
+  (testing "multi-arg mapping passes bindings spread as args"
+    (let [rel (test-trie-iter [:a :b] [[1 10] [2 20] [3 30]])
+          out (mapping rel [:a :b] + :sum)]
+      (is (= [:a :b :sum] (:variables out)))
+      (is (= [[1 10 11] [2 20 22] [3 30 33]]
+             (trie-routes (:trie-iterator out))))))
+
+  (testing "non-prefix subseq inserts after the last subseq variable"
+    (let [rel (test-trie-iter [:a :b :c] [[1 10 100] [2 20 200]])
+          out (mapping rel [:a :c] + :sum)]
+      (is (= [:a :b :c :sum] (:variables out)))
+      (is (= [[1 10 100 101] [2 20 200 202]]
+             (trie-routes (:trie-iterator out))))))
+
+  (testing "insertion position depends on last subseq variable"
+    (let [rel (test-trie-iter [:a :b :c] [[1 10 100]])]
+      (is (= [:m :a :b :c]    (:variables (mapping rel []         (constantly 0) :m))))
+      (is (= [:a :m :b :c]    (:variables (mapping rel [:a]       (constantly 0) :m))))
+      (is (= [:a :b :m :c]    (:variables (mapping rel [:a :b]    (constantly 0) :m))))
+      (is (= [:a :b :c :m]    (:variables (mapping rel [:a :b :c] (constantly 0) :m))))))
+
+  (testing "->seek on inserted singleton level honors compare<= semantics"
+    (let [rel  (test-trie-iter [:n] [[5]])
+          out  (mapping rel [:n] #(* 2 %) :double)
+          singleton (-> out :trie-iterator trie-open)]
+      (is (= 10 (get-key singleton)))
+      (is (= 10 (-> singleton (->seek 5) get-key)))
+      (is (= 10 (-> singleton (->seek 10) get-key)))
+      (is (nil? (->seek singleton 11)))
+      (is (nil? (->next singleton)))))
+
+  (testing "mapping composes with relations to populate the new variable"
+    (let [rel (test-trie-iter [:a :b] [[1 10] [2 20]])
+          out (mapping rel [:a :b] * :prod)]
+      (is (= [{:a 1 :b 10 :prod 10}
+              {:a 2 :b 20 :prod 40}]
+             (relations out)))))
+
+  (testing "mapping-iterator returns the trie-iterator directly"
+    (let [rel (test-trie-iter [:n] [[1] [2] [3]])]
+      (is (= [[1 1] [2 4] [3 9]]
+             (trie-routes (mapping-iterator rel [:n] #(* % %) :sq)))))))
+
+
 (deftest annotated-trie-iterator-tests
   (testing "Map input stores annotation at the leaf, accessible via Annotated"
     (let [iter (trie-iterator {[1 2 3] :foo})]
@@ -402,4 +461,142 @@
           j (trie-join [:a :b :c] [r s])]
       (is (= #{[1 2 9] [1 3 9]}
              (set (trie-routes (:trie-iterator j))))))))
+
+
+(deftest annotated-mapping-tests
+  (testing "mapping inserted at the new leaf carries the underlying leaf's annotation"
+    (let [rel  {:variables [:a :b] :trie-iterator (trie-iterator {[1 10] :alpha
+                                                                  [2 20] :beta})}
+          out  (mapping rel [:a :b] + :sum)
+          leaf (-> out :trie-iterator trie-open trie-open)]
+      (is (= [:a :b :sum] (:variables out)))
+      (is (= 11 (get-key leaf)))
+      (is (= :alpha (annotation leaf)))))
+
+  (testing "mapping inserted before the original leaf preserves leaf annotations"
+    (let [rel  {:variables [:a :b] :trie-iterator (trie-iterator {[1 10] :alpha
+                                                                  [2 20] :beta})}
+          out  (mapping rel [:a] #(* 2 %) :double)
+          leaf (-> out :trie-iterator trie-open trie-open)]
+      (is (= [:a :double :b] (:variables out)))
+      (is (= 10 (get-key leaf)))
+      (is (= :alpha (annotation leaf)))))
+
+  (testing "mapping with empty subseq preserves leaf annotations"
+    (let [rel  {:variables [:a :b] :trie-iterator (trie-iterator {[1 10] :alpha})}
+          out  (mapping rel [] (constantly 99) :c)
+          leaf (-> out :trie-iterator trie-open trie-open)]
+      (is (= [:c :a :b] (:variables out)))
+      (is (= :alpha (annotation leaf)))))
+
+  (testing "mapping over a single-variable rel becomes a leaf-level singleton with annotation"
+    (let [rel  {:variables [:n] :trie-iterator (trie-iterator {[5] :marker})}
+          out  (mapping rel [:n] #(* % %) :sq)
+          leaf (-> out :trie-iterator trie-open)]
+      (is (= [:n :sq] (:variables out)))
+      (is (= 25 (get-key leaf)))
+      (is (= :marker (annotation leaf)))))
+
+  (testing "mapping inserted in the middle preserves leaf annotation"
+    (let [rel  {:variables [:a :b :c] :trie-iterator (trie-iterator {[1 2 3] :gamma})}
+          out  (mapping rel [:a :b] + :m)
+          leaf (-> out :trie-iterator trie-open trie-open trie-open)]
+      (is (= [:a :b :m :c] (:variables out)))
+      (is (= 3 (get-key leaf)))
+      (is (= :gamma (annotation leaf))))))
+
+
+(deftest annotated-reorder-tests
+  (testing "no-op reorder preserves annotation"
+    (let [rel  {:variables [:a :b] :trie-iterator (trie-iterator {[1 2] :alpha})}
+          out  (reorder [:a :b] rel)
+          leaf (-> out :trie-iterator trie-open)]
+      (is (= [:a :b] (:variables out)))
+      (is (= :alpha (annotation leaf)))))
+
+  (testing "swapping two variables preserves the annotation of each tuple"
+    (let [rel  {:variables [:a :b] :trie-iterator (trie-iterator {[1 10] :x
+                                                                  [1 20] :y
+                                                                  [2 10] :z})}
+          out  (reorder [:b :a] rel)]
+      (is (= [:b :a] (:variables out)))
+      (is (= {[10 1] :x, [10 2] :z, [20 1] :y}
+             (into {}
+                   (for [b-iter (iterate ->next (:trie-iterator out))
+                         :while b-iter
+                         :let [a-iter (trie-open b-iter)]
+                         leaf (iterate ->next a-iter)
+                         :while leaf]
+                     [[(get-key b-iter) (get-key leaf)] (annotation leaf)]))))))
+
+  (testing "reorder swapping last two of three variables preserves leaf annotations"
+    (let [rel  {:variables [:a :b :c] :trie-iterator (trie-iterator {[1 2 3] :p
+                                                                     [1 4 5] :q})}
+          out  (reorder [:a :c :b] rel)]
+      (is (= [:a :c :b] (:variables out)))
+      (is (= {[1 3 2] :p, [1 5 4] :q}
+             (into {}
+                   (for [a-iter (iterate ->next (:trie-iterator out))
+                         :while a-iter
+                         :let [c-iter (trie-open a-iter)]
+                         c-iter (iterate ->next c-iter)
+                         :while c-iter
+                         :let [b-iter (trie-open c-iter)]
+                         leaf (iterate ->next b-iter)
+                         :while leaf]
+                     [[(get-key a-iter) (get-key c-iter) (get-key leaf)]
+                      (annotation leaf)])))))))
+
+
+(defn- annotated-tuples
+  "Walks rel's trie and returns a {path → leaf-annotation} map."
+  [{:keys [trie-iterator]}]
+  (letfn [(walk [iter prefix]
+            (mapcat (fn [it]
+                      (let [path (conj prefix (get-key it))]
+                        (if-let [child (trie-open it)]
+                          (walk child path)
+                          [[path (annotation it)]])))
+                    (take-while some? (iterate ->next iter))))]
+    (into {} (walk trie-iterator []))))
+
+(deftest omit-tests
+  (testing "identity omit preserves all tuples"
+    (let [out (omit (test-trie-iter [:a :b] [[1 10] [2 20]]) [:a :b] +)]
+      (is (= [:a :b] (:variables out)))
+      (is (= {[1 10] nil, [2 20] nil} (annotated-tuples out)))))
+
+  (testing "omitting the trailing variable combines merged annotations"
+    (let [out (omit (test-trie-iter [:a :b] {[1 10] 1, [1 20] 2, [2 30] 4}) [:a] +)]
+      (is (= [:a] (:variables out)))
+      (is (= {[1] 3, [2] 4} (annotated-tuples out)))))
+
+  (testing "omitting the leading variable combines across collapsed paths"
+    (let [out (omit (test-trie-iter [:a :b] {[1 10] 5, [2 10] 7, [3 20] 9}) [:b] +)]
+      (is (= [:b] (:variables out)))
+      (is (= {[10] 12, [20] 9} (annotated-tuples out)))))
+
+  (testing "omitting a middle variable combines across the omitted layer"
+    (let [out (omit (test-trie-iter [:a :b :c] {[1 5 10] 100, [1 6 10] 200, [1 6 20] 50}) [:a :c] +)]
+      (is (= [:a :c] (:variables out)))
+      (is (= {[1 10] 300, [1 20] 50} (annotated-tuples out)))))
+
+  (testing "combine-fn is not invoked when projections are unique"
+    (let [calls (atom 0)
+          cb    (fn [a b] (swap! calls inc) (+ a b))]
+      (annotated-tuples (omit (test-trie-iter [:a :b] {[1 10] 1, [2 20] 2}) [:a] cb))
+      (is (= 0 @calls))))
+
+  (testing "phantom paths from antijoin are not promoted to complete tuples"
+    (let [base (test-trie-iter [:a :b :c] [[1 5 10] [2 5 10] [2 6 20] [3 7 30]])
+          rel  (trie-antijoin base (test-trie-iter [:c] [[10]]))]
+      (is (= [[1 5] [2 5] [2 6 20] [3 7 30]]
+             (trie-routes (:trie-iterator rel)))
+          "sanity: rel has phantom paths [1 5] and [2 5]")
+      (is (= [{:b 6 :c 20} {:b 7 :c 30}]
+             (relations (omit rel [:b :c] +))))
+      (is (= [{:a 2 :c 20} {:a 3 :c 30}]
+             (relations (omit rel [:a :c] +))))
+      (is (= [{:a 2 :b 6}  {:a 3 :b 7}]
+             (relations (omit rel [:a :b] +)))))))
 
