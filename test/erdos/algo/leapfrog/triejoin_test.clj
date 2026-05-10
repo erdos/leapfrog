@@ -239,6 +239,21 @@
           (is (= 8 (-> seeked ->next (->seek 8) get-key)))))))
 
 
+(deftest nested-trie-join-prunes-dead-branches
+  ;; Regression: when an inner trie-join's leapfrog matches at depth d
+  ;; but trie-open at d→d+1 fails, the outer must propagate that nil.
+  ;; Falling back to the stale inner iter would leak its d-level key
+  ;; into the outer's later leapfrogs and emit a phantom tuple with the
+  ;; entity id leaking into a sibling's slot.
+  (let [inner (trie-join [:e :a] [(test-trie-iter [:e :a] [[1 :ok] [2 :no]])
+                                  (test-trie-iter [:a]    [[:ok]])])
+        sib   (test-trie-iter [:e :x] [[1 10] [2 20]])
+        outer (trie-join [:e :a :x] [inner sib])]
+    ;; Only e=1 has :a=:ok. Without the fix, e=2 leaks as the phantom
+    ;; {:e 2 :a 2 :x 20} — :a slot filled with the stale entity id.
+    (is (= [{:e 1 :a :ok :x 10}] (relations outer)))))
+
+
 (def exponents
   (test-trie-iter [:n1 :n2 :n3]
                   [[1 1 1]
