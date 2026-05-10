@@ -239,6 +239,21 @@
           (is (= 8 (-> seeked ->next (->seek 8) get-key)))))))
 
 
+(deftest trie-join-prunes-dead-branches                                                                                                                                 
+  ;; Regression: when one relation matches a key at a level but its nested                                                                                              
+  ;; structure can't descend (e.g., another constraint inside an inner                                                                                                  
+  ;; trie-join rejects), the outer join must propagate that failure rather                                                                                              
+  ;; than fall back to the stale iter (which would leak its current-depth                                                                                               
+  ;; key into later levels' leapfrog and produce phantom truncated routes).                                                                                             
+  (let [r1 (test-trie-iter [:e :a1 :v1] [[1 :name "Janos"] [2 :name "Bela"]])                                                                                           
+        r2 (test-trie-iter [:e :a2 :v2] [[1 :age 30] [3 :age 25]])                                                                                                      
+        c1 (test-trie-iter [:a1] [[:name]])                                                                                                                             
+        c2 (test-trie-iter [:a2] [[:age]])                                                                                                                              
+        joined (trie-join [:e :a1 :v1 :a2 :v2] [r1 c1 r2 c2])]                                                                                                          
+        ;; Only e=1 has both :name and :age in this storage.                                                                                                                
+     (is (= [{:e 1 :a1 :name :v1 "Janos" :a2 :age :v2 30}]                                                                                                               
+            (relations joined)))))                                                                                                                                       
+
 (def exponents
   (test-trie-iter [:n1 :n2 :n3]
                   [[1 1 1]
