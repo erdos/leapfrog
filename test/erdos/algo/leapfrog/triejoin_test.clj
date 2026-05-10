@@ -254,6 +254,36 @@
      (is (= [{:e 1 :a1 :name :v1 "Janos" :a2 :age :v2 30}]                                                                                                               
             (relations joined)))))                                                                                                                                       
 
+(deftest nested-trie-join-prunes-dead-branches-2
+  ;; Regression: when an *inner* trie-join's leapfrog matches a key at
+  ;; depth d but its leapfrog at d+1 fails (e.g., a Constants demand
+  ;; rejects the key's children), the inner trie-open returns nil. The
+  ;; outer trie-join must propagate that failure; falling back to the
+  ;; stale inner iter would leak its d-level key into the outer's d+1
+  ;; leapfrog (single-iter leapfrog trivially "matches" anything) and
+  ;; trie-routes/relations would emit a phantom complete-looking tuple
+  ;; whose later slots are filled with the stale iter's wrong-depth key.
+  ;;
+  ;; Structure: outer trie-join over two *nested* trie-joins, each
+  ;; filtering the same eav by an attribute constant.
+  (let [eav-tuples [[1 :name "Janos"] [1 :age 30]
+                    [2 :name "Bela"]
+                    [3 :age 25]]
+        named (trie-join [:e :a1 :v1]
+                         [(test-trie-iter [:e :a1 :v1] eav-tuples)
+                          (test-trie-iter [:a1] [[:name]])])
+        aged  (trie-join [:e :a2 :v2]
+                         [(test-trie-iter [:e :a2 :v2] eav-tuples)
+                          (test-trie-iter [:a2] [[:age]])])
+        outer (trie-join [:e :a1 :v1 :a2 :v2] [named aged])]
+    ;; Only e=1 has both :name and :age. e=2 has only :name; e=3 has only
+    ;; :age. With the old (or trie-open i) i) fallback, e=2 and e=3 each
+    ;; produce a phantom tuple whose unbound slots are filled with the
+    ;; entity id (e.g. {:e 2 :a1 :name :v1 "Bela" :a2 2 :v2 2}).
+    (is (= [{:e 1 :a1 :name :v1 "Janos" :a2 :age :v2 30}]
+           (relations outer)))))
+
+
 (def exponents
   (test-trie-iter [:n1 :n2 :n3]
                   [[1 1 1]
