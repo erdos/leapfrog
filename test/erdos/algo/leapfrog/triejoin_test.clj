@@ -600,3 +600,17 @@
       (is (= [{:a 2 :b 6}  {:a 3 :b 7}]
              (relations (omit rel [:a :b] +)))))))
 
+(deftest trie-antijoin-leaf-annotations                                   
+  (testing "antijoin passes through clause-side leaf annotations"         
+    ;; Antijoin is a gate, not a combiner — surviving clause tuples must  
+    ;; expose their original leaf annotation.                             
+    (let [a  (annotated-trie [:x :y] {[1 10] {:mult 2}                    
+                                      [1 20] {:mult 3}                    
+                                      [2 30] {:mult 5}})                  
+          ;; Mask out [1 10]; [1 20] and [2 30] should survive.           
+          b  (annotated-trie [:x :y] {[1 10] {}})                         
+          aj (trie-antijoin a b)]                                         
+      (is (= #{[[1 20] {:mult 3}] [[2 30] {:mult 5}]}                     
+             (set (annotated-routes (:trie-iterator aj) 2)))))))          
+
+
